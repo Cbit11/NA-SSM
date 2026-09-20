@@ -1,4 +1,4 @@
-name: journal_model_tiny
+name: journal_model_base
 num_gpu: auto
 manual_seed: 0
 resume_training: False
@@ -9,9 +9,10 @@ train_lr_pth: /home/cjrathod/DF2K/DF2K_train_LR_bicubic/X2
 
 val_hr_pth: /home/cjrathod/DF2K/DF2K_valid_HR
 val_lr_pth: /home/cjrathod/DF2K/DF2K_valid_LR_bicubic/X2
+model_type: model2
 # Dataloaders
 #train_dataloader:
-train_batch_size: 16
+train_batch_size: 8
 train_shuffle : True
 scale: 2
 gt_size: 128
@@ -24,10 +25,10 @@ img_size: 64
 in_chans: 3
 patch_size: 1
 dims: 128
-input_resolution: 64
-depth: [2,6,2]
-attention_depth: [4, 2 ,4]
-num_heads: [8,8,8] 
+input_resolution: 64 
+depth: [2,6,4,2,2]
+attention_depth: [4,6,2,2,4]
+num_heads: [8,8,8,8,8] 
 kernel_size: 3 
 stride: 1
 dilation: 1
@@ -52,24 +53,26 @@ drop_rate: 0.
 attn_drop_rate: 0.
 drop_path_rate: 0.1
 
+
 #train:
-Iteration: 150000
+Iteration: 250000
 ema_decay: 0.999
 #optim_g:
 type: Adam
-lr: !!float 4.0e-4
+lr: !!float 2.0e-4
 weight_decay: 0
 betas: [0.9, 0.99]
 
 #scheduler:
 type: MultiStepLR
-milestones: [50000,80000,100000,125000,140000]
+milestones: [70000,80000,100000,150000, 200000, 240000]
 gamma: 0.5
 
-warmup_iter: 8000  # no warm up
+warmup_iter: 10000  # no warm up
 
   # losses
 #pixel_opt:
-checkpoint: /home/cjrathod/journal/checkpoint/Tiny_model/latest_checkpoint_journal_model_tiny.pt
-checkpoint_folder: /home/cjrathod/projects/def-mhassanz/cjrathod/HAMBA/chkpts/X2_tiny
+checkpoint: /project/def-mhassanz/cjrathod/Hamba/checkpoint/chkpt_10_DF2K.pt
+checkpoint_folder: /home/cjrathod/projects/def-mhassanz/cjrathod/HAMBA/chkpts/X2_base
+
 

@@ -11,11 +11,14 @@ import datetime
 import wandb
 import argparse
 from argparse import Namespace
+from arch.model2 import Main_Model
 from arch.model1 import main_block
+from arch.ablation_1 import Ablation_Model
 from timm import utils
 from torch.amp import autocast, GradScaler
 from basicsr.metrics.psnr_ssim import calculate_psnr_pt, calculate_ssim_pt
 torch.backends.cudnn.benchmark = True
+
 def str2bool(v):
     if isinstance(v, bool):
         return v
@@ -23,6 +26,8 @@ def str2bool(v):
         return True
     elif v.lower() in ('no', 'false', 'f', 'n', '0'):
         return False
+    elif v.lower() in ('None', "none"):
+        return None
     else:
         raise argparse.ArgumentTypeError('Boolean value expected.')
 def get_norm_layer(layer_name):
@@ -61,11 +66,14 @@ def load_config_and_parse_args():
     
     if isinstance(defaults.get('norm_layer'), str):
         defaults['norm_layer']= get_norm_layer(defaults['norm_layer'])
+    if isinstance(defaults.get('qk_scale'), str):
+        defaults['qk_scale']= str2bool(defaults['qk_scale'])
     main_parser= argparse.ArgumentParser()
     main_parser.add_argument('--train_hr_pth', type = str)
     main_parser.add_argument('--train_lr_pth', type = str)
     main_parser.add_argument('--val_hr_pth', type = str)
     main_parser.add_argument('--val_lr_pth', type = str)
+    main_parser.add_argument('--checkpoint_folder', type = str)
     main_parser.set_defaults(**defaults)
     args = main_parser.parse_args(remaining_argv)
     return args
@@ -100,7 +108,7 @@ def save_checkpoint(current_iter, model, args, optimizer, scheduler):
         torch.save(chkpt, os.path.join(args.checkpoint_folder, f'latest_checkpoint_{args.name}.pt'))
         print(f"Iteration: {current_iter} | Training snapshot saved.")
 
-def tiled_inference(model,img_lr, scale=2, tile_size=256, overlap=32):
+def tiled_inference(model,img_lr, scale=2, tile_size=64, overlap=32):
     b, c, h, w = img_lr.shape
     out_h, out_w = h * scale, w * scale
     output = torch.zeros((b, c, out_h, out_w), device=img_lr.device)
@@ -162,37 +170,44 @@ def main():
     init_process_group(backend='nccl',world_size=world_size, rank=rank, timeout= datetime.timedelta(seconds=7200))
     args = load_config_and_parse_args()
     device = torch.device(f"cuda:{current_device}") 
-    model = main_block(
-                 img_size= args.img_size, 
-                 patch_size= args.patch_size, 
-                 in_chans= args.in_chans, 
-                 dims= args.dims,
-                 kernel_size= args.kernel_size, 
-                 dilation= args.dilation, 
-                 num_heads= args.num_heads,
-                 num_blocks= args.num_blocks,
-                 stride=args.stride,
-                 downsample=args.downsample, 
-                 upscale=args.upscale,
-                 drop_rate=args.drop_rate,
-                 drop_path_rate=args.drop_path_rate,
-                 window_size= args.window_size,
-                 overlap_ratio= args.overlap_ratio, 
-                 ape = args.ape,
-                 upsampler= args.upsampler,
-                 d_state=args.d_state,
-                 d_conv=args.d_conv,
-                 expand=args.expand, 
-                 norm_layer= args.norm_layer, 
-                 resi_connection=args.resi_connection, 
-                 img_range=args.img_range
-    ).to(device)
-    moedl = torch.compile(model)
+    model = Main_Model(
+            img_size=args.img_size,
+            in_chans=args.in_chans,
+            patch_size= args.patch_size,
+            dims= args.dims,
+            input_resolution=args.input_resolution, 
+            depth= args.depth,
+            attention_depth= args.attention_depth,
+            num_heads= args.num_heads,
+            kernel_size= args.kernel_size,  
+            stride= args.stride, 
+            dilation= args.dilation,
+            window_size= args.window_size,
+            overlap_ratio= args.overlap_ratio,
+            qkv_bias= args.qkv_bias,
+            patch_norm= args.patch_norm,
+            ape= args.ape,
+            downsample= args.downsample,
+            d_state= args.d_state, 
+            d_conv= args.d_conv, 
+            expand= args.expand, 
+            num_tokens= args.num_tokens,
+            inner_rank= args.inner_rank,
+            mlp_ratio= args.mlp_ratio,
+            norm_layer= args.norm_layer,
+            upsampler= args.upsampler,
+            upscale= args.upscale,
+            resi_connection= args.resi_connection,
+            img_range= args.img_range,
+            drop_rate= args.drop_rate,
+            attn_drop_rate= args.attn_drop_rate,
+            drop_path_rate= args.drop_path_rate).to(device)
     model = DDP(model, device_ids= [local_rank])
     #Build Optimizers and loss functions and schedulers
     loss_fn = nn.L1Loss()
     optimizer= torch.optim.Adam(params= model.parameters(), lr = args.lr, betas= (args.betas))
-    main_scheduler= torch.optim.lr_scheduler.MultiStepLR(optimizer, args.milestones)
+    #main_scheduler= torch.optim.lr_scheduler.MultiStepLR(optimizer, args.milestones)
+    main_scheduler= torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max= args.Iteration)
     if args.warmup_iter is not None:
         warmup_scheduler= torch.optim.lr_scheduler.LinearLR(optimizer, total_iters= args.warmup_iter)
         lr_scheduler= torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup_scheduler, main_scheduler], milestones=[args.warmup_iter])
@@ -246,9 +261,9 @@ def main():
     total_iteration = args.Iteration
     steps_per_epoch = len(train_loader)
     epoch = current_iter // steps_per_epoch
-    print_freq= 500
+    print_freq= 200
     accumulation_steps= 2
-    val_freq= 1000
+    val_freq= 500
     running_loss= torch.zeros(1, device= device)
     step_count = 0
     optimizer.zero_grad()
@@ -258,7 +273,6 @@ def main():
         train_sampler.set_epoch(epoch) 
         model.train()
         # Train Loop 
-
         for batch, data in enumerate(train_loader):
             micro_step_ct+=1
             do_sync = (micro_step_ct) % accumulation_steps == 0
@@ -306,7 +320,7 @@ def main():
                         for vdata in val_loader:
                             gt = vdata['gt'].to(device,non_blocking=True)
                             lr = vdata['lq'].to(device,non_blocking=True)
-                            pred = tiled_inference(model.module, lr, args.scale, tile_size=128)
+                            pred = tiled_inference(model.module, lr, args.scale, tile_size=64)
                             pred= pred.float()
                             pred.clamp_(0, 1)
                             val_loss+=loss_fn(pred, gt)
